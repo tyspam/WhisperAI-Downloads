@@ -59,7 +59,7 @@ jobs:
           $setupExists = $false
           if ($releaseExists) {
             $assets = ($releaseJson | ConvertFrom-Json).assets
-            $setupExists = $null -ne ($assets | Where-Object name -eq "WhisperAI-Setup.exe")
+            $setupExists = $null -ne ($assets | Where-Object name -eq "WhisperAI-Complete-Setup.exe")
           }
           "build_app=$(!$releaseExists)".ToLowerInvariant() | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "build_setup=$(!$setupExists)".ToLowerInvariant() | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
@@ -76,6 +76,7 @@ jobs:
           cache-dependency-path: |
             source/requirements.txt
             source/requirements-packaged.txt
+            source/requirements-complete.txt
             source/requirements-build.txt
 
       - uses: actions/setup-node@v4
@@ -91,7 +92,7 @@ jobs:
             choco install ffmpeg -y --no-progress
           }
           python -m pip install --upgrade pip
-          python -m pip install -r source/requirements-packaged.txt -r source/requirements-build.txt
+          python -m pip install -r source/requirements-complete.txt -r source/requirements-build.txt
 
       - name: Test and build application bundle
         if: steps.select.outputs.build_app == 'true'
@@ -99,7 +100,7 @@ jobs:
         working-directory: source
         run: |
           python release_gate.py
-          packaging/Build-Windows.ps1 -Python python -SkipDependencyInstall -SkipTests
+          packaging/Build-Windows.ps1 -Python python -Complete -SkipDependencyInstall -SkipTests
           packaging/Test-Package.ps1
 
       - name: Restore signing certificate
@@ -157,7 +158,7 @@ jobs:
             -Filter signtool.exe -Recurse | Where-Object FullName -Match '\\x64\\' |
             Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
           if (-not $signTool) { throw "SignTool was not found." }
-          $setup = "distribution\dist\WhisperAI-Setup.exe"
+          $setup = "distribution\dist\WhisperAI-Complete-Setup.exe"
           & $signTool sign /fd SHA256 /f "$env:RUNNER_TEMP\WhisperAI-Signing.pfx" `
             /p "${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}" $setup
           if ($LASTEXITCODE -ne 0) { throw "Signing the setup executable failed." }
@@ -172,14 +173,14 @@ jobs:
         run: |
           gh release create "${{ steps.select.outputs.tag }}" dist/release/* `
             --repo $env:RELEASE_REPOSITORY `
-            --title "Whisper AI ${{ steps.select.outputs.version }}" `
-            --notes "Signed internal Windows release. Follow the installation instructions in the downloads repository."
+            --title "Whisper AI Complete ${{ steps.select.outputs.version }}" `
+            --notes "One-download Complete Windows release with tested optional runtimes. Models remain on-demand."
 
       - name: Publish one-file installer
         if: steps.select.outputs.build_setup == 'true'
         shell: pwsh
         run: |
           gh release upload "${{ steps.select.outputs.tag }}" `
-            distribution/dist/WhisperAI-Setup.exe `
+            distribution/dist/WhisperAI-Complete-Setup.exe `
             --repo $env:RELEASE_REPOSITORY `
             --clobber

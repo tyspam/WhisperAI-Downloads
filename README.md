@@ -11,7 +11,7 @@ certificate. The one-file setup program verifies and trusts that exact
 certificate, then opens Windows App Installer.
 
 1. Open the [latest release](../../releases/latest).
-2. Download and double-click `WhisperAI-Setup.exe`.
+2. Download and double-click `WhisperAI-Complete-Setup.exe`.
 3. If Windows SmartScreen appears, choose **More info**, then **Run anyway**.
 4. Approve the administrator prompt and complete the Windows App Installer dialog.
 
@@ -22,6 +22,10 @@ first laptop installation can still show an **Unknown publisher** warning.
 
 The certificate, AppInstaller file, and PowerShell script remain available in
 the release as a manual fallback for IT staff.
+
+The Complete setup contains the tested Python runtime and approved optional
+engines. Users do not install Python or run pip. Large model weights download
+only when selected in **System Readiness**, then remain cached locally.
 
 ## Updates
 
