@@ -26,4 +26,3 @@ if ($actual -ne $expectedThumbprint) {
 Import-Certificate -FilePath $certificate -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
 Start-Process -FilePath $appInstaller
 Write-Host "Publisher trusted. Complete installation in the Windows App Installer window."
-

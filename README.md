@@ -35,4 +35,3 @@ Only install files published by this repository. The expected publisher is
 `CN=Whisper AI Internal Distribution`. This free internal certificate is not a
 publicly trusted commercial identity; it is appropriate only for colleagues who
 have received and trusted the certificate through the installation procedure.
-
