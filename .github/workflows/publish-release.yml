@@ -1,0 +1,132 @@
+name: Publish signed Whisper AI release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Source tag to publish, such as v4.0.0. Leave empty for latest.
+        required: false
+        type: string
+  schedule:
+    - cron: "17 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      PYTHONUTF8: "1"
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_REPOSITORY: tyspam/WhisperAI-Downloads
+      UPDATE_BASE_URI: https://github.com/tyspam/WhisperAI-Downloads/releases/latest/download
+
+    steps:
+      - name: Checkout distribution files
+        uses: actions/checkout@v4
+        with:
+          path: distribution
+
+      - name: Checkout private application source read-only
+        uses: actions/checkout@v4
+        with:
+          repository: tyspam/Whisper_Ai-OI-Translation-Transcription-Tool
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          fetch-depth: 0
+          path: source
+
+      - name: Select unpublished source tag
+        id: select
+        shell: pwsh
+        run: |
+          $requested = "${{ inputs.tag }}".Trim()
+          if ($requested) {
+            $tag = $requested
+          } else {
+            $tag = git -C source tag --list "v*" |
+              Where-Object { $_ -match '^v\d+(\.\d+){1,2}$' } |
+              Sort-Object { [version]$_.Substring(1) } -Descending |
+              Select-Object -First 1
+          }
+          if (-not $tag) { throw "No version tag was found in the private source repository." }
+          git -C source checkout --detach $tag
+          $version = python -c "import sys; sys.path.insert(0, 'source'); from app_version import __version__; print(__version__)"
+          if ($tag -ne "v$version") { throw "Source tag $tag does not match app_version.py v$version." }
+          gh release view $tag --repo $env:RELEASE_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            "build=false" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Host "$tag is already published."
+          } else {
+            "build=true" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
+          "tag=$tag" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "version=$version" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - uses: actions/setup-python@v5
+        if: steps.select.outputs.build == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            source/requirements.txt
+            source/requirements-packaged.txt
+            source/requirements-build.txt
+
+      - uses: actions/setup-node@v4
+        if: steps.select.outputs.build == 'true'
+        with:
+          node-version: "22"
+
+      - name: Install FFmpeg and Python dependencies
+        if: steps.select.outputs.build == 'true'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+          }
+          python -m pip install --upgrade pip
+          python -m pip install -r source/requirements-packaged.txt -r source/requirements-build.txt
+
+      - name: Test and build application bundle
+        if: steps.select.outputs.build == 'true'
+        shell: pwsh
+        working-directory: source
+        run: |
+          python release_gate.py
+          packaging/Build-Windows.ps1 -Python python -SkipDependencyInstall -SkipTests
+          packaging/Test-Package.ps1
+
+      - name: Restore signing certificate
+        if: steps.select.outputs.build == 'true'
+        shell: pwsh
+        run: |
+          $bytes = [Convert]::FromBase64String("${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}")
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\WhisperAI-Signing.pfx", $bytes)
+          Import-Certificate -FilePath distribution/WhisperAI-Publisher.cer `
+            -CertStoreLocation Cert:\CurrentUser\TrustedPeople | Out-Null
+
+      - name: Build and verify signed MSIX
+        if: steps.select.outputs.build == 'true'
+        shell: pwsh
+        working-directory: source
+        run: |
+          packaging/Build-MSIX.ps1 `
+            -Version "${{ steps.select.outputs.version }}" `
+            -Publisher "${{ secrets.WINDOWS_SIGNING_PUBLISHER }}" `
+            -UpdateBaseUri $env:UPDATE_BASE_URI `
+            -CertificatePath "$env:RUNNER_TEMP\WhisperAI-Signing.pfx" `
+            -CertificatePassword "${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}"
+          Copy-Item ../distribution/WhisperAI-Publisher.cer dist/release/
+          Copy-Item ../distribution/Install-WhisperAI.ps1 dist/release/
+
+      - name: Publish public binary release
+        if: steps.select.outputs.build == 'true'
+        shell: pwsh
+        working-directory: source
+        run: |
+          gh release create "${{ steps.select.outputs.tag }}" dist/release/* `
+            --repo $env:RELEASE_REPOSITORY `
+            --title "Whisper AI ${{ steps.select.outputs.version }}" `
+            --notes "Signed internal Windows release. Follow the installation instructions in the downloads repository."
