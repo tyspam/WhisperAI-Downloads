@@ -106,7 +106,7 @@ jobs:
           $bytes = [Convert]::FromBase64String("${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}")
           [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\WhisperAI-Signing.pfx", $bytes)
           Import-Certificate -FilePath distribution/WhisperAI-Publisher.cer `
-            -CertStoreLocation Cert:\CurrentUser\TrustedPeople | Out-Null
+            -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
 
       - name: Build and verify signed MSIX
         if: steps.select.outputs.build == 'true'
