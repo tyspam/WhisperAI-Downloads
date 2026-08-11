@@ -37,7 +37,7 @@ jobs:
           fetch-depth: 0
           path: source
 
-      - name: Select unpublished source tag
+      - name: Select source tag and required artifacts
         id: select
         shell: pwsh
         run: |
@@ -54,19 +54,22 @@ jobs:
           git -C source checkout --detach $tag
           $version = python -c "import sys; sys.path.insert(0, 'source'); from app_version import __version__; print(__version__)"
           if ($tag -ne "v$version") { throw "Source tag $tag does not match app_version.py v$version." }
-          gh release view $tag --repo $env:RELEASE_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) {
-            "build=false" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
-            Write-Host "$tag is already published."
-          } else {
-            "build=true" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $releaseJson = gh release view $tag --repo $env:RELEASE_REPOSITORY --json assets 2>$null
+          $releaseExists = $LASTEXITCODE -eq 0
+          $setupExists = $false
+          if ($releaseExists) {
+            $assets = ($releaseJson | ConvertFrom-Json).assets
+            $setupExists = $null -ne ($assets | Where-Object name -eq "WhisperAI-Setup.exe")
           }
+          "build_app=$(!$releaseExists)".ToLowerInvariant() | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "build_setup=$(!$setupExists)".ToLowerInvariant() | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "release_exists=$releaseExists".ToLowerInvariant() | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
           $global:LASTEXITCODE = 0
           "tag=$tag" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "version=$version" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - uses: actions/setup-python@v5
-        if: steps.select.outputs.build == 'true'
+        if: steps.select.outputs.build_app == 'true'
         with:
           python-version: "3.12"
           cache: pip
@@ -76,12 +79,12 @@ jobs:
             source/requirements-build.txt
 
       - uses: actions/setup-node@v4
-        if: steps.select.outputs.build == 'true'
+        if: steps.select.outputs.build_app == 'true'
         with:
           node-version: "22"
 
       - name: Install FFmpeg and Python dependencies
-        if: steps.select.outputs.build == 'true'
+        if: steps.select.outputs.build_app == 'true'
         shell: pwsh
         run: |
           if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
@@ -91,7 +94,7 @@ jobs:
           python -m pip install -r source/requirements-packaged.txt -r source/requirements-build.txt
 
       - name: Test and build application bundle
-        if: steps.select.outputs.build == 'true'
+        if: steps.select.outputs.build_app == 'true'
         shell: pwsh
         working-directory: source
         run: |
@@ -100,7 +103,7 @@ jobs:
           packaging/Test-Package.ps1
 
       - name: Restore signing certificate
-        if: steps.select.outputs.build == 'true'
+        if: steps.select.outputs.build_app == 'true' || steps.select.outputs.build_setup == 'true'
         shell: pwsh
         run: |
           $bytes = [Convert]::FromBase64String("${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}")
@@ -109,7 +112,7 @@ jobs:
             -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
 
       - name: Build and verify signed MSIX
-        if: steps.select.outputs.build == 'true'
+        if: steps.select.outputs.build_app == 'true'
         shell: pwsh
         working-directory: source
         run: |
@@ -122,8 +125,48 @@ jobs:
           Copy-Item ../distribution/WhisperAI-Publisher.cer dist/release/
           Copy-Item ../distribution/Install-WhisperAI.ps1 dist/release/
 
+      - name: Prepare one-file installer inputs
+        if: steps.select.outputs.build_setup == 'true'
+        shell: pwsh
+        run: |
+          if ("${{ steps.select.outputs.build_app }}" -eq "true") {
+            Copy-Item source/dist/release/WhisperAI.appinstaller distribution/WhisperAI.appinstaller -Force
+          } else {
+            gh release download "${{ steps.select.outputs.tag }}" `
+              --repo $env:RELEASE_REPOSITORY `
+              --pattern WhisperAI.appinstaller `
+              --dir distribution `
+              --clobber
+          }
+          choco install innosetup -y --no-progress
+
+      - name: Build, sign, and verify one-file installer
+        if: steps.select.outputs.build_setup == 'true'
+        shell: pwsh
+        run: |
+          $env:WHISPERAI_VERSION = "${{ steps.select.outputs.version }}"
+          $iscc = @(
+            "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "Inno Setup compiler was not found." }
+          & $iscc distribution/installer/WhisperAI.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE." }
+
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+            -Filter signtool.exe -Recurse | Where-Object FullName -Match '\\x64\\' |
+            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signTool) { throw "SignTool was not found." }
+          $setup = "distribution\dist\WhisperAI-Setup.exe"
+          & $signTool sign /fd SHA256 /f "$env:RUNNER_TEMP\WhisperAI-Signing.pfx" `
+            /p "${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}" $setup
+          if ($LASTEXITCODE -ne 0) { throw "Signing the setup executable failed." }
+          & $signTool verify /pa /v $setup
+          if ($LASTEXITCODE -ne 0) { throw "Setup signature verification failed." }
+          Get-FileHash $setup -Algorithm SHA256 | Format-List
+
       - name: Publish public binary release
-        if: steps.select.outputs.build == 'true'
+        if: steps.select.outputs.build_app == 'true'
         shell: pwsh
         working-directory: source
         run: |
@@ -131,3 +174,12 @@ jobs:
             --repo $env:RELEASE_REPOSITORY `
             --title "Whisper AI ${{ steps.select.outputs.version }}" `
             --notes "Signed internal Windows release. Follow the installation instructions in the downloads repository."
+
+      - name: Publish one-file installer
+        if: steps.select.outputs.build_setup == 'true'
+        shell: pwsh
+        run: |
+          gh release upload "${{ steps.select.outputs.tag }}" `
+            distribution/dist/WhisperAI-Setup.exe `
+            --repo $env:RELEASE_REPOSITORY `
+            --clobber
